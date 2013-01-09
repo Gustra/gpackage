@@ -1,0 +1,483 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use Carp;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+# Variables
+
+my $package_root          = $ENV{ GPACKAGE_ROOT } || '/opt/gpackage';
+my $package_database_file = $ENV{ GPACKAGE_DATABASE } ||
+  $package_root . '/.installed';
+my $package_directory     = $package_root;
+my $verbose;
+my $test;
+
+# Subroutines
+
+#*
+# Returns the contents of a directory
+#
+sub get_directory_contents ( $;% ) {
+  my ( $directory, %options ) = @_;
+  my $include = delete( $options{ -include } ) || '.';
+  my $exclude = delete( $options{ -exclude } ) || '^[/]$';
+  %options and
+    croak( "Error: get_directory_contents: unknown option(s):\n" .
+      join( "\n", keys %options ));
+  opendir( DIR, $directory ) or do { warn "$directory: $!";
+                                     return () };
+  my @contents = map { "$directory/$_" }
+    grep { /$include/ && ! /$exclude/ } readdir DIR;
+  closedir DIR;
+  return @contents;
+}
+
+#*
+# Returns a list files recursively
+#
+sub get_files_recursively ( $;% ) {
+  my ( $directory, %options ) = @_;
+  my @children    = get_directory_contents( $directory, %options );
+  my @descendants = grep { -l $_ || ! -d $_ } @children;
+  return ( @descendants, map { get_files_recursively( $_, %options )
+                             } grep { -d $_ } @children );
+}
+
+#*
+# Reads the database
+#
+sub read_package_database ( $$ ) {
+  my ( $file, $db ) = @_;
+
+  open( FILE, $file ) or return;
+  foreach ( <FILE> ) {
+    chomp;
+    next if /^\s*(#.*)\z/;
+    if ( /^([^:]+)(:(.+))?/ ) {
+      $$db{ $1 } = {} unless exists $$db{ $1 };
+#      if ( $3 ) {
+#        %{$$db{ $1 }} = map { split( '=', $_ ) } split( ',', $3 );
+#      }
+    }
+  }
+  close FILE;
+}
+
+#*
+# Saves the database
+#
+sub write_package_database ( $$ ) {
+  my ( $file, $db ) = @_;
+
+  open( FILE, '>', $file ) or die "$file: $!";
+  foreach my $pkg ( sort keys %$db ) {
+    print FILE "$pkg\n";
+#    if ( %{$$db{ $pkg }} ) {
+#      print FILE ":" . join(',',
+#                            map { "$_:".$$db{ $pkg }{ $_ } }
+#                            keys %{$$db{ $pkg }} );
+  }
+  close FILE;
+}
+
+#*
+# Reads the configuration of a package
+#
+sub read_package ( $$ ) {
+  my ( $package, $directory ) = @_;
+  my $config = { NAME => $package,
+                 PATH => "$directory/$package",
+                 CONTENTS => {} };
+  open( FILE, "$directory/$package" ) or
+    die "$directory/$package: $!";
+  my $current_target;
+  foreach ( <FILE> ) {
+    chomp;
+    next if /^\s*(#.*)\z/;
+    if ( /^@(.*)/ ) {
+      $current_target = $1;
+      $$config{ CONTENTS }{ $current_target } = []
+        unless exists $$config{ CONTENTS }{ $current_target };
+    } else {
+      $current_target or die "Error: $directory/$package: $.: no target (missing a '\@' line above)\n";
+      push @{$$config{ CONTENTS }{$current_target}}, $_;
+    }
+  }
+  close FILE;
+  return $config;
+}
+
+#*
+# Determines the list of files to be installed
+#
+sub get_package_elements ( $ ) {
+  my ( $pkg ) = @_;
+  my $contents = $$pkg{ CONTENTS };
+  my %elements;
+  foreach my $target ( keys %$contents ) {
+    foreach my $source ( @{$$contents{ $target }} ) {
+      if ( $source =~ m#(.+)/\z# ) {
+        my $src = $1;
+        -d $src or do { warn "$src: $!"; next };
+        foreach ( get_files_recursively( $src,
+                                         -exclude => '^\.' )) {
+          s#^$source##;
+          $elements{ "$src/$_" } = $target . '/' . $_;
+        }
+      } else {
+        $elements{ $source } = $target . '/' . basename( $source );
+      }
+    }
+  }
+  return %elements;
+}
+
+#*
+# Enables a package
+#
+sub enable_package ( $$ ) {
+  my ( $pkg, $database_file ) = @_;
+
+  my $db = {};
+  read_package_database( $database_file, $db );
+  if ( exists $$db{ $$pkg{ NAME } } ) {
+    print "$$pkg{NAME} is already enabled. Reenable? ";
+    exit unless <STDIN> =~ /^yes/i;
+  }
+
+  my %elements = get_package_elements( $pkg );
+
+  print "Installing " . scalar( values %elements ) . " elements\n";
+
+  my $policy = '';
+  my @existing = grep { -e } values %elements;
+  if ( @existing ) {
+    print join("\n", @existing ), "\n\nThe above files are already installed, how shall I handle them?\nReplace, skip, ask per file, or quit? ";
+    my $ans = lc( <STDIN> );
+    chomp $ans;
+    exit if 'quit' =~ /^$ans/;
+    $policy = 'skip'    if 'skip' =~ /^$ans/;
+    $policy = 'ask'     if 'ask' =~ /^$ans/;
+    $policy = 'replace' if 'replace' =~ /^$ans/;
+    $policy or exit;
+  } else {
+    $policy = 'ask';
+  }
+
+  foreach my $target ( values %elements ) {
+    if ( -e $target ) {
+      next if 'skip' eq $policy;
+      if ( 'replace' eq $policy ) {
+        $test and print "unlink $target\n";
+        $test or unlink $target;
+      } else {
+        print "$target exists.\nReplace, skip or quit? ";
+        my $ans = lc(<STDIN>);
+        chomp $ans;
+        next if 'skip' =~ /^$ans/;
+        exit unless 'replace' =~ /^$ans/;
+        $test and print "rm $target\n";
+        $test or unlink $target or
+          do { warn "$target: $!. Skipping\n"; next };
+      }
+    }
+  }
+  foreach my $source ( keys %elements ) {
+    next if -e $elements{ $source };
+    unless ( -d dirname( $elements{ $source } )) {
+      $test and print "mkdir -p " . dirname( $elements{ $source }) . "\n";
+      $test or system("mkdir -p " . dirname( $elements{ $source }));
+    }
+    $test and print "symlink $source <-- $elements{ $source }\n";
+    $test or symlink( $source, $elements{ $source } );
+  }
+
+  $$db{ $$pkg{NAME} } = {} unless exists $$db{ $$pkg{NAME} };
+  $test or write_package_database( $database_file, $db );
+}
+
+#*
+# Disables a package
+#
+sub disable_package ( $$ ) {
+  my ( $pkg, $database_file ) = @_;
+
+  my $db = {};
+  read_package_database( $database_file, $db );
+  unless ( exists $$db{ $$pkg{ NAME } } ) {
+    print "$$pkg{NAME} is not enabled. Try to remove anyway? ";
+    exit unless <STDIN> =~ /^y(es)?/i;
+  }
+
+  my %elements = get_package_elements( $pkg );
+
+  print "Removing " . scalar( values %elements ) . " elements\n";
+
+  my %directories;
+  foreach my $link ( sort values %elements ) {
+    unless ( exists $directories{ dirname( $link ) } ) {
+      ++$directories{ dirname( $link ) };
+      my @path = split( '/', dirname( $link ));
+      while ( @path ) {
+        ++$directories{ join('/', @path) };
+        pop @path;
+      }
+    }
+    next unless -e $link;
+    if ( -l $link ) {
+      $test and print "unlink $link\n";
+      $test or unlink( $link ) or warn "$link: $!";
+    } else {
+      warn "$link is not a symbolic link. Not removed.\n";
+    }
+  }
+  foreach my $dir ( reverse sort keys %directories ) {
+    -d $dir or next;
+    if ( ! get_directory_contents( $dir,
+                                   -exclude => '^[.]{1,2}$' ) ) {
+      $test and print "rmdir $dir\n";
+      $test or rmdir( $dir ) or warn "$dir: $!\n";
+    } else {
+      print "$dir was not deleted because it is not empty\n";
+    }
+  }
+  delete $$db{ $$pkg{ NAME } };
+  $test or write_package_database( $database_file, $db );
+}
+
+# Command-line options
+my $help;
+my $man_page;
+my $short_list;
+
+GetOptions(
+           'help'       => \$help,
+           'man-page'   => \$man_page,
+           'short-list' => \$short_list,
+           'verbose'    => \$verbose,
+           'test'       => \$test,
+          ) or exit;
+$help     and pod2usage( -verbose => 1 );
+$man_page and pod2usage( -verbose => 2 );
+@ARGV     or  pod2usage( -verbose => 0 );
+
+my $command = shift @ARGV;
+
+# Program main
+
+if ( 'installed' eq $command ) {
+  my $db = {};
+  read_package_database( $package_database_file, $db );
+  foreach ( keys %$db ) {
+    print "$_\n";
+  }
+} elsif ( 'list' eq $command ) {
+  my $db = {};
+  read_package_database( $package_database_file, $db );
+  -d $package_directory or die "$package_directory: $!";
+  my @available = sort( get_directory_contents( $package_directory,
+                                                -exclude => '^\.' ));
+  if ( @available ) {
+    ! $short_list and
+      print " Available packages (*=installed)\n" .
+        "----------------------------------\n";
+    foreach ( @available ) {
+      unless ( $short_list ) {
+        if ( exists $$db{ $_ } ) {
+          print "* ";
+        } else {
+          print "  ";
+        }
+      }
+      print basename( $_ ) . "\n";
+    }
+  }
+} elsif ( 'contents' eq $command ) {
+  @ARGV or pod2usage( -msg => 'Missing package name' );
+  my $package = read_package( shift( @ARGV ), $package_directory );
+  my %elements = get_package_elements( $package );
+  print join( "\n", sort keys %elements ), "\n";
+} elsif ( 'enable' eq $command ) {
+  @ARGV or pod2usage( -msg => 'Missing package name' );
+  my $package = read_package( shift( @ARGV ), $package_directory );
+  enable_package( $package, $package_database_file );
+} elsif ( 'disable' eq $command ) {
+  @ARGV or pod2usage( -msg => 'Missing package name' );
+  my $pkg = shift @ARGV;
+  my $package = read_package( $pkg, $package_directory );
+  disable_package( $package, $package_database_file );
+}
+
+# There must be an empty line after __END__. See perldoc perlpod
+__END__
+
+=head1 NAME
+
+gpackage - simple software package manager
+
+=head1 SYNOPSIS
+
+gpackage I<command> [ <options> ]
+
+=head1 DESCRIPTION
+
+This is a very simple package manager. It manages symbolic links pointing to
+the actual file location for each file in the package.
+
+The default location for package files is F</opt/gpackage>, but can be
+configured using the environment variable C<GPACKAGE_ROOT>.
+
+The general idea for using this package manager is to install each application
+inside its own directory, and then make symbolic links in a centrally
+accessible location to the application's files. This way the physical files and
+directories can be removed by simply deleting the application's directory. An
+example setup:
+
+  /opt/app/<name>   - installed software
+  /opt/gpackage     - gpackage package files
+  /opt/bin          \
+  /opt/lib          |- enabled packages
+  /opt/share        |
+  etc.              /
+  
+The gpackage manager only creates and keeps track of the symbolic links and
+directories in the "enabled" directory structure. It does not touch anything in
+the installation directory.
+
+The general process is the following:
+
+=over 4
+
+=item 1
+
+wget I<URL>
+
+=item 2
+
+tar xzf I<name>.tgz
+
+=item 3
+
+cd I<name> ; 
+./configure PREFIX=/opt/app/I<name>
+
+=item 4
+
+make install
+
+=item 5
+
+vi /opt/gpackage/I<name>
+
+=item 6
+
+gpackage enable I<name>
+
+=back
+
+=head1 COMMANDS
+
+=over 4
+
+=item installed
+
+List installed packages.
+
+=item list [ B<--short-list> ]
+
+List available and installed packages.
+
+=item contents I<name>
+
+List the contents in package I<name>.
+
+=item enable I<name>
+
+Enable packge I<name>. This creates symbolic links from the target
+directories to the application installations directory.
+
+=item disable I<name>
+
+Disables package I<name>. Removes all installed symbolic links for
+the package.
+
+=back
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<--help>
+
+Shows program options
+
+=item B<--man-page>
+
+Displays the man page
+
+=item B<--test>
+
+Run in test mode. Does not change persistent data.
+
+=item B<--verbose>
+
+Print information about what the program is doing.
+
+=back
+
+=head1 VARIABLES
+
+=over 4
+
+=item GPACKAGE_ROOT
+
+Specifies the directory where all package files are located. Default is
+F</opt/gpackage>.
+
+=item GPACKAGE_DATABASE
+
+Specifies the location of the gpackage database file. Default is
+C<${GPACKAGE_ROOT}/.installed>.
+
+=back
+
+=head1 PACKAGE FILE FORMAT
+
+The format of the package file is a target I<directory> followed by one or more
+"from" lines, like this:
+
+  @/opt
+  /opt/app/mythtv-0.20/
+
+This will duplicate the directory structure under F<mythtv-0.20> in C<@/opt>,
+and create symbolic links in the F</opt> structure pointing to the files in the
+F<mythtv-0.20> structure.
+ 
+=head1 CAVEATS
+
+=over 4
+
+=item *
+
+There is no "unattended" mode, so the user might need to answer questions
+during "enable" and "disable" commands
+
+=item *
+
+It is not possible to specify exclusions in the package file. If one file is to
+be excluded, then the other files must be specified separately:
+
+  @/opt/bin
+  /opt/app/mythtv-0.20/bin/mythtv-setup
+  /opt/app/mythtv-0.20/bin/mythbackend
+
+=back
+
+=head1 SEE ALSO
+
+-
