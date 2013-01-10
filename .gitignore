@@ -1,3 +1,4 @@
 *~
-t/data/bin/
-t/data/lib/
+*.swp
+t/data/target/bin/
+t/data/target/lib/
