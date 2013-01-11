@@ -26,7 +26,7 @@ my $app1bin1    = File::Spec->catfile( $targetdir, qw(bin bin1) );
 my $app2bin2    = File::Spec->catfile( $targetdir, qw(bin bin2) );
 my $common_file = File::Spec->catfile( $targetdir, qw(bin common_file) );
 
-$ENV{GPACKAGE_ROOT} = $pkgdir;
+$ENV{GPACKAGE_PACKAGE_DIR} = $pkgdir;
 
 # build_up
 #
@@ -58,7 +58,7 @@ sub test_compile {
 sub test_config {
   my @output = `$gpackage config 2>&1`;
   is_deeply( \@output,
-             [ "GPACKAGE_ROOT=$pkgdir\n", "GPACKAGE_DATABASE=$database\n" ],
+             [ "GPACKAGE_PACKAGE_DIR=$pkgdir\n", "GPACKAGE_DATABASE=$database\n" ],
              'Test environment configured' )
     or BAIL_OUT('Setting up configuration failed');
 }

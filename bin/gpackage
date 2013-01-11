@@ -5,15 +5,15 @@ use warnings;
 
 use Carp;
 use File::Basename;
+use File::Spec;
 use Getopt::Long;
 use Pod::Usage;
 
 # Variables
 
-my $package_root = $ENV{GPACKAGE_ROOT} || '/opt/gpackage';
+my $package_directory = $ENV{GPACKAGE_PACKAGE_DIR} || File::Spec->catdir(qw/opt gpackage/);
 my $package_database_file = $ENV{GPACKAGE_DATABASE}
-  || $package_root . '/.enabled';
-my $package_directory = $package_root;
+  || File::Spec->catfile( $package_directory, '.enabled' );
 my $verbose;
 my $test;
 
@@ -341,7 +341,7 @@ elsif ( 'disable' eq $command ) {
   disable_package( $package, $package_database_file );
 }
 elsif ( 'config' eq $command ) {
-  print 'GPACKAGE_ROOT=', $package_root, "\n",
+  print 'GPACKAGE_PACKAGE_DIR=', $package_directory, "\n",
     'GPACKAGE_DATABASE=', $package_database_file, "\n";
 } else {
   pod2usage( -verbose => 1, -message => $command . ': unknown command.' );
@@ -364,7 +364,7 @@ This is a very simple package manager. It manages symbolic links pointing to
 the actual file location for each file in the package.
 
 The default location for package files is F</opt/gpackage>, but can be
-configured using the environment variable C<GPACKAGE_ROOT>.
+configured using the environment variable C<GPACKAGE_PACKAGE_DIR>.
 
 The general idea for using this package manager is to install each application
 inside its own directory, and then make symbolic links in a centrally
@@ -483,7 +483,7 @@ Print information about what the program is doing.
 
 =over 4
 
-=item GPACKAGE_ROOT
+=item GPACKAGE_PACKAGE_DIR
 
 Specifies the directory where all package files are located. Default is
 F</opt/gpackage>.
@@ -491,7 +491,7 @@ F</opt/gpackage>.
 =item GPACKAGE_DATABASE
 
 Specifies the location of the gpackage database file. Default is
-C<${GPACKAGE_ROOT}/.enabled>.
+C<${GPACKAGE_PACKAGE_DIR}/.enabled>.
 
 =back
 
