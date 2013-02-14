@@ -552,6 +552,8 @@ be excluded, then the other files must be specified separately:
 It is not possible to create links with a different name than the item it is
 pointing to.
 
+=back
+
 =head1 TO DO
 
 =over 4
